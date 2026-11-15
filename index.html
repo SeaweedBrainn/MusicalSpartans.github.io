@@ -3,43 +3,143 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>Unity Web Player | RhythmGameEngine</title>
+    <title>Rhythm Engine</title>
+    <style>
+      html, body { margin: 0; padding: 0; border: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      body { position: fixed; inset: 0; }
+      #unity-canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #231F20; display: block; outline: none; }
+      #unity-loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        color: #ddd; font: 16px/1.4 sans-serif; pointer-events: none; }
+      #unity-bar { width: min(320px, 60vw); height: 8px; margin-top: 12px; background: #333; border-radius: 4px; overflow: hidden; }
+      #unity-fill { width: 0%; height: 100%; background: #4caf50; }
+      #unity-error { position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 16px; background: #5a1010; color: #fff;
+        font: 14px/1.4 monospace; white-space: pre-wrap; display: none; max-height: 40%; overflow: auto; z-index: 2; }
+      #size-warning { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 16px); box-sizing: border-box;
+        display: none; align-items: center; gap: 10px; padding: 6px 10px; background: rgba(20, 20, 24, 0.92); color: #eee;
+        font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; border: 1px solid #555; border-radius: 6px;
+        z-index: 3; pointer-events: none; user-select: none; -webkit-user-select: none; }
+      /* Only the x button takes clicks; everything else in the banner passes them through to the canvas. */
+      #size-warning button { all: unset; pointer-events: auto; cursor: pointer; padding: 0 4px; font-size: 16px; line-height: 1; color: #bbb; }
+      #size-warning button:hover, #size-warning button:focus-visible { color: #fff; }
+    </style>
   </head>
-  <body style="text-align: center; padding: 0; border: 0; margin: 0;">
-    <canvas id="unity-canvas" width=1920 height=1080 tabindex="-1" style="width: 1920px; height: 1080px; background: #231F20"></canvas>
+  <body>
+    <canvas id="unity-canvas" tabindex="0"></canvas>
+    <div id="unity-loading"><div id="unity-loading-text">Loading... 0%</div><div id="unity-bar"><div id="unity-fill"></div></div></div>
+    <div id="unity-error"></div>
+    <div id="size-warning" role="status" aria-live="polite"><span id="size-warning-text"></span><button type="button" id="size-warning-close" tabindex="-1" aria-label="Dismiss">&times;</button></div>
     <script src="Build/WebGL.loader.js"></script>
     <script>
-      if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
-        // Mobile device style: fill the whole browser client area with the game canvas:
-        var meta = document.createElement('meta');
-        meta.name = 'viewport';
-        meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
-        document.getElementsByTagName('head')[0].appendChild(meta);
+      (function () {
+        var canvas = document.getElementById("unity-canvas");
+        var loading = document.getElementById("unity-loading");
+        var loadingText = document.getElementById("unity-loading-text");
+        var fill = document.getElementById("unity-fill");
+        var errorBox = document.getElementById("unity-error");
+        var warning = document.getElementById("size-warning");
+        var warningText = document.getElementById("size-warning-text");
+        var warningClose = document.getElementById("size-warning-close");
 
-        var canvas = document.querySelector("#unity-canvas");
-        canvas.style.width = "100%";
-        canvas.style.height = "100%";
-        canvas.style.position = "fixed";
+        // BEGIN sizing-logic
+        var MIN_WIDTH = 960;   // 60% of the 1600x900 UI reference, CSS pixels
+        var MIN_HEIGHT = 540;
+        function isTooSmall(w, h) {
+          return w < MIN_WIDTH || h < MIN_HEIGHT;
+        }
+        // Phones and tablets have no zoom shortcut. iPadOS in desktop mode reports platform "MacIntel"
+        // with a Mac userAgent, so it is told apart by its touch points (a Mac reports 0).
+        function isTouchDevice(platformString, userAgent, maxTouchPoints) {
+          if (/iPhone|iPad|iPod|Android/i.test(String(userAgent || ""))) return true;
+          return /^MacIntel$/i.test(String(platformString || "")) && Number(maxTouchPoints) > 1;
+        }
+        // The zoom-out shortcut, or null on a touch device (it has none).
+        function zoomHint(platformString, userAgent, maxTouchPoints) {
+          if (isTouchDevice(platformString, userAgent, maxTouchPoints)) return null;
+          return /Mac/i.test(String(platformString || "") + " " + String(userAgent || ""))
+            ? "\u2318 \u2212 (Command minus)" : "Ctrl \u2212";
+        }
+        function sizeWarningText(platformString, userAgent, maxTouchPoints) {
+          var hint = zoomHint(platformString, userAgent, maxTouchPoints);
+          return hint === null
+            ? "Window too small for Rhythm Engine. Rotate to landscape or use a larger screen."
+            : "Window too small for Rhythm Engine. Zoom out with " + hint + " to fit.";
+        }
+        // Render-resolution multiplier: the browser's devicePixelRatio (it changes with browser zoom), capped at 2.
+        function cappedDpr(dpr) {
+          return Math.min(dpr || 1, 2);
+        }
+        // END sizing-logic
 
-        document.body.style.textAlign = "left";
+        if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+          // Mobile device style: use device width/height for the viewport.
+          var meta = document.createElement("meta");
+          meta.name = "viewport";
+          meta.content = "width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes";
+          document.getElementsByTagName("head")[0].appendChild(meta);
+        }
 
-      }
+        var platform = [navigator.userAgentData && navigator.userAgentData.platform, navigator.platform].filter(Boolean).join(" ");
+        warningText.textContent = sizeWarningText(platform, navigator.userAgent, navigator.maxTouchPoints);
+        var wasSmall = false, dismissed = false;
+        var unityInstance = null;
+        warningClose.addEventListener("click", function () { dismissed = true; warning.style.display = "none"; focusCanvas(); });
+        // The banner never takes keyboard focus: no mousedown on it (the x button included) moves focus off the canvas.
+        warning.addEventListener("mousedown", function (e) { e.preventDefault(); });
 
-      createUnityInstance(document.querySelector("#unity-canvas"), {
-        arguments: [],
-        dataUrl: "Build/WebGL.data",
-        frameworkUrl: "Build/WebGL.framework.js",
-        codeUrl: "Build/WebGL.wasm",
-        streamingAssetsUrl: "StreamingAssets",
-        companyName: "DefaultCompany",
-        productName: "RhythmGameEngine",
-        productVersion: "1.0",
-        // matchWebGLToCanvasSize: false, // Uncomment this to separately control WebGL canvas render size and DOM element size.
-        // devicePixelRatio: 1, // Uncomment this to override low DPI rendering on high DPI displays.
-      }).then((unityInstance) => {
-      }).catch((message) => {
-        alert(message);
-      });
+        // Canvas fills the whole window at any aspect ratio; the in-game UI adapts itself.
+        function layout() {
+          var w = Math.max(1, window.innerWidth);
+          var h = Math.max(1, window.innerHeight);
+          canvas.style.width = w + "px";
+          canvas.style.height = h + "px";
+          var small = isTooSmall(w, h);
+          if (small && !wasSmall) dismissed = false; // re-arm on OK -> too small
+          wasSmall = small;
+          warning.style.display = (small && !dismissed) ? "flex" : "none";
+          // Browser zoom changes devicePixelRatio and fires resize: follow it, so the game stays sharp
+          // after zooming in and does not render extra pixels after zooming out.
+          if (unityInstance && unityInstance.Module) {
+            unityInstance.Module.devicePixelRatio = cappedDpr(window.devicePixelRatio);
+          }
+        }
+        window.addEventListener("resize", layout);
+        window.addEventListener("orientationchange", function () { layout(); setTimeout(layout, 250); });
+        layout();
+
+        function focusCanvas() { canvas.focus(); }
+        canvas.addEventListener("click", focusCanvas);
+        canvas.addEventListener("mousedown", focusCanvas);
+        canvas.addEventListener("touchstart", focusCanvas);
+        focusCanvas();
+
+        var config = {
+          arguments: [],
+          dataUrl: "Build/WebGL.data",
+          frameworkUrl: "Build/WebGL.framework.js",
+          codeUrl: "Build/WebGL.wasm",
+          streamingAssetsUrl: "StreamingAssets",
+          companyName: "DefaultCompany",
+          productName: "RhythmGameEngine",
+          productVersion: "1.0",
+          // matchWebGLToCanvasSize left at its default (true): render size follows the element.
+          devicePixelRatio: cappedDpr(window.devicePixelRatio)
+        };
+
+        createUnityInstance(canvas, config, function (progress) {
+          var pct = Math.round(progress * 100);
+          loadingText.textContent = "Loading... " + pct + "%";
+          fill.style.width = pct + "%";
+        }).then(function (instance) {
+          unityInstance = instance;
+          loading.parentNode.removeChild(loading);
+          layout();
+          focusCanvas();
+        }).catch(function (message) {
+          if (loading.parentNode) loading.parentNode.removeChild(loading);
+          errorBox.textContent = "Failed to load game: " + message;
+          errorBox.style.display = "block";
+        });
+      })();
     </script>
   </body>
 </html>
